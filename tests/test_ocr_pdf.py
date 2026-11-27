@@ -162,3 +162,62 @@ def test_upside_down_fax_image_pdf_detected_by_180_pass(tmp_path):
         re_res = reader.read(out.path)
         re_text = "\n".join(b.text for b in re_res.blocks)
         assert "4654298" not in re_text.replace(" ", "")
+
+
+def test_rapidocr_cpu_pure_image_and_180_pdf(tmp_path):
+    from PIL import Image
+    from privacy_operator.reader.ocr import RapidOcrEngine
+
+    src = pymupdf.open()
+    p = src.new_page(width=720, height=540)
+    font_kw = {"fontname": "malgun", "fontfile": str(MALGUN)} if MALGUN.is_file() else {"fontname": "korea"}
+    p.insert_text((80, 120), "테스트 문서", fontsize=24, **font_kw)
+    p.insert_text((80, 190), "연락처: 010-2345-6789", fontsize=22, **font_kw)
+    normal_png = p.get_pixmap(dpi=150).tobytes("png")
+    src.close()
+
+    fax_doc = pymupdf.open()
+    fp = fax_doc.new_page(width=420, height=80)
+    fp.insert_text((20, 52), "FAX 031 4654298", fontsize=24, **font_kw)
+    fax_pix = fp.get_pixmap(dpi=150)
+    fax_doc.close()
+
+    import io
+
+    with Image.open(io.BytesIO(normal_png)) as base_img, Image.open(io.BytesIO(fax_pix.tobytes("png"))) as fax_img:
+        rot_fax = fax_img.rotate(180)
+        base_img.paste(rot_fax, (420, 820))
+        buf = io.BytesIO()
+        base_img.save(buf, format="PNG")
+        merged_png = buf.getvalue()
+
+    pdf_path = tmp_path / "rapid_upside_down.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page(width=720, height=540)
+    page.insert_image(pymupdf.Rect(0, 0, 720, 540), stream=merged_png)
+    doc.save(pdf_path)
+    doc.close()
+
+    engine = RapidOcrEngine(preprocess=True, rotate_180=True, default_dpi=150, default_max_side_px=1800)
+    with DocumentReader(ocr_enabled=True, ocr_engine=engine) as reader:
+        res = reader.read(pdf_path)
+        ocr_blocks = [b for b in res.blocks if b.kind == OCR]
+        combined = "\n".join(b.text for b in ocr_blocks)
+        assert "010-2345-6789" in combined
+        assert "4654298" in combined.replace(" ", "")
+
+        findings = detect([res])
+        assert any(f.category == "전화" and "4654298" in f.raw_value.replace(" ", "") for f in findings)
+        for f in findings:
+            f.review_status = STATUS_CONFIRMED
+        book = AliasBook("TEST-RAPID")
+        docs = pseudonymize([res], findings, book)
+        plan = ReplacementPlan(findings, docs)
+        out = write_original(
+            pdf_path, "pdf", plan, tmp_path / "out", "rapid_redacted", reader, ocr_blocks=ocr_blocks
+        )
+        assert out.ok and out.path is not None
+        re_res = reader.read(out.path)
+        re_text = "\n".join(b.text for b in re_res.blocks)
+        assert "010-2345-6789" not in re_text
+        assert "4654298" not in re_text.replace(" ", "")

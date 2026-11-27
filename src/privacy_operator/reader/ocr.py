@@ -252,8 +252,7 @@ def _estimate_skew_angle(gray) -> float | None:
     if raw_lines is None:
         return None
     angles: list[float] = []
-    for seg in raw_lines:
-        x1, y1, x2, y2 = (int(v) for v in seg[0])
+    for x1, y1, x2, y2 in np.asarray(raw_lines).reshape(-1, 4).tolist():
         if x2 < x1:
             x1, y1, x2, y2 = x2, y2, x1, y1
         dx = x2 - x1
@@ -395,8 +394,231 @@ def _merge_180_lines(
     return merged
 
 
-class PaddleOcrEngine:
+class _BaseOcrEngine:
+    """Shared scan preprocessing, deskew inverse mapping, 180-degree pass, and PDF raster OCR."""
+
+    default_dpi: int = 150
+    default_max_side_px: int = 1800
+    default_img_max_side_px: int = 1600
+
+    def __init__(self, lang: str = "korean", min_score: float = 0.25, preprocess: bool = True, rotate_180: bool = False):
+        self.lang = lang
+        self.min_score = min_score
+        self.preprocess = preprocess
+        self.rotate_180 = rotate_180
+        self._ocr = None
+        self._lock = threading.Lock()
+
+    def _ensure_ocr(self):
+        raise NotImplementedError
+
+    def _run_raw_ocr(self, engine, rgb_array) -> list[OcrLine]:
+        raise NotImplementedError
+
+    def ocr_array(self, rgb_array) -> list[OcrLine]:
+        import numpy as np
+
+        engine = self._ensure_ocr()
+        h, w = rgb_array.shape[:2]
+        deskew_meta = None
+        proc = rgb_array
+        if self.preprocess:
+            proc, deskew_meta = preprocess_scan_rgb(rgb_array, deskew=True)
+
+        lines_0 = self._run_raw_ocr(engine, proc)
+        if self.rotate_180 and proc.shape[0] >= 40 and proc.shape[1] >= 40:
+            rot180 = np.ascontiguousarray(proc[::-1, ::-1])
+            ph, pw = proc.shape[:2]
+            raw_180 = self._run_raw_ocr(engine, rot180)
+            mapped_180 = [
+                OcrLine(text=ln.text, box=_rotate_180_box(ln.box, pw, ph), score=ln.score)
+                for ln in raw_180
+            ]
+            lines = _merge_180_lines(lines_0, mapped_180)
+        else:
+            lines = lines_0
+
+        if deskew_meta is not None:
+            angle, cx, cy = deskew_meta
+            lines = [
+                OcrLine(text=ln.text, box=_invert_deskew_box(ln.box, angle, cx, cy, w, h), score=ln.score)
+                for ln in lines
+            ]
+        return lines
+
+    def ocr_image_bytes(self, image_bytes: bytes) -> list[OcrLine]:
+        import numpy as np
+        from PIL import Image
+
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            rgb = img.convert("RGB")
+            w, h = rgb.size
+            if w < 16 or h < 16:
+                return []
+            arr = np.asarray(rgb)
+        return self.ocr_array(arr)
+
+    @staticmethod
+    def _capped_matrix(width: float, height: float, dpi: int, max_side_px: int):
+        import pymupdf
+
+        zoom = dpi / 72.0
+        longest = max(width, height) * zoom
+        if longest > max_side_px and longest > 0:
+            zoom *= max_side_px / longest
+        return pymupdf.Matrix(zoom, zoom)
+
+    def ocr_pdf_page(self, page, dpi: int | None = None, max_side_px: int | None = None) -> list[OcrLine]:
+        """Render a PDF page to RGB and map recognized boxes back into PDF page points."""
+        import numpy as np
+
+        use_dpi = self.default_dpi if dpi is None else dpi
+        use_max = self.default_max_side_px if max_side_px is None else max_side_px
+        mat = self._capped_matrix(page.rect.width, page.rect.height, use_dpi, use_max)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        if pix.width < 16 or pix.height < 16:
+            return []
+        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+        if pix.n == 4:
+            arr = arr[:, :, :3]
+        raw_lines = self.ocr_array(arr)
+        sx = page.rect.width / float(pix.width)
+        sy = page.rect.height / float(pix.height)
+        rx0, ry0 = float(page.rect.x0), float(page.rect.y0)
+        return [
+            OcrLine(
+                text=ln.text,
+                box=(rx0 + ln.box[0] * sx, ry0 + ln.box[1] * sy, rx0 + ln.box[2] * sx, ry0 + ln.box[3] * sy),
+                score=ln.score,
+            )
+            for ln in raw_lines
+        ]
+
+    def ocr_pdf_embedded_images(
+        self,
+        page,
+        dpi: int | None = None,
+        min_px: int = 40,
+        max_side_px: int | None = None,
+    ) -> list[OcrLine]:
+        """OCR non-tiny embedded images placed on a PDF page, returning PDF page point coords."""
+        import numpy as np
+        import pymupdf
+
+        use_dpi = self.default_dpi if dpi is None else dpi
+        use_max = self.default_img_max_side_px if max_side_px is None else max_side_px
+        lines: list[OcrLine] = []
+        seen_rects: list[tuple[float, float, float, float]] = []
+        for info in page.get_image_info(xrefs=True) or ():
+            bbox = info.get("bbox")
+            if not bbox:
+                continue
+            rect = pymupdf.Rect(bbox) & page.rect
+            if rect.is_empty or rect.width < 20 or rect.height < 20:
+                continue
+            key = (round(rect.x0, 1), round(rect.y0, 1), round(rect.x1, 1), round(rect.y1, 1))
+            if key in seen_rects:
+                continue
+            seen_rects.append(key)
+            mat = self._capped_matrix(rect.width, rect.height, use_dpi, use_max)
+            pix = page.get_pixmap(clip=rect, matrix=mat, alpha=False)
+            if pix.width < min_px or pix.height < min_px:
+                continue
+            arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+            if pix.n == 4:
+                arr = arr[:, :, :3]
+            raw = self.ocr_array(arr)
+            sx = rect.width / float(pix.width)
+            sy = rect.height / float(pix.height)
+            for ln in raw:
+                lines.append(
+                    OcrLine(
+                        text=ln.text,
+                        box=(
+                            rect.x0 + ln.box[0] * sx,
+                            rect.y0 + ln.box[1] * sy,
+                            rect.x0 + ln.box[2] * sx,
+                            rect.y0 + ln.box[3] * sy,
+                        ),
+                        score=ln.score,
+                    )
+                )
+        return lines
+
+
+class RapidOcrEngine(_BaseOcrEngine):
+    """Lightweight ONNX Runtime CPU OCR engine using PP-OCRv5 mobile Korean models."""
+
+    def __init__(
+        self,
+        lang: str = "korean",
+        min_score: float = 0.25,
+        preprocess: bool = True,
+        rotate_180: bool = False,
+        use_cls: bool = True,
+        default_dpi: int = 150,
+        default_max_side_px: int = 1800,
+    ):
+        super().__init__(lang=lang, min_score=min_score, preprocess=preprocess, rotate_180=rotate_180)
+        self.use_cls = use_cls
+        self.default_dpi = default_dpi
+        self.default_max_side_px = default_max_side_px
+        self.default_img_max_side_px = min(1600, default_max_side_px)
+
+    def _ensure_ocr(self):
+        if self._ocr is not None:
+            return self._ocr
+        with self._lock:
+            if self._ocr is not None:
+                return self._ocr
+            from rapidocr import EngineType, LangRec, ModelType, OCRVersion, RapidOCR
+
+            rec_lang = LangRec.KOREAN if self.lang == "korean" else LangRec.CH
+            params = {
+                "Global.use_cls": self.use_cls,
+                "Det.engine_type": EngineType.ONNXRUNTIME,
+                "Det.ocr_version": OCRVersion.PPOCRV5,
+                "Det.model_type": ModelType.MOBILE,
+                "Cls.engine_type": EngineType.ONNXRUNTIME,
+                "Rec.engine_type": EngineType.ONNXRUNTIME,
+                "Rec.ocr_version": OCRVersion.PPOCRV5,
+                "Rec.lang_type": rec_lang,
+                "Rec.model_type": ModelType.MOBILE,
+            }
+            self._ocr = RapidOCR(params=params)
+            return self._ocr
+
+    def _run_raw_ocr(self, engine, rgb_array) -> list[OcrLine]:
+        import numpy as np
+
+        bgr = np.ascontiguousarray(rgb_array[:, :, ::-1])
+        out = engine(bgr, use_cls=self.use_cls)
+        boxes = getattr(out, "boxes", None)
+        txts = getattr(out, "txts", None)
+        scores = getattr(out, "scores", None)
+        if boxes is None or txts is None:
+            return []
+        if scores is None:
+            scores = [1.0] * len(txts)
+        lines: list[OcrLine] = []
+        for poly, txt, sc in zip(boxes, txts, scores):
+            if not isinstance(txt, str) or not txt.strip():
+                continue
+            score = float(sc) if sc is not None else 1.0
+            if score < self.min_score:
+                continue
+            rect = _poly_to_rect(poly)
+            if rect is not None:
+                lines.append(OcrLine(txt.strip(), rect, score))
+        return lines
+
+
+class PaddleOcrEngine(_BaseOcrEngine):
     """Lazy-initialized PaddleOCR engine with GPU acceleration, scan preprocessing, and 180-degree pass."""
+
+    default_dpi: int = 200
+    default_max_side_px: int = 2400
+    default_img_max_side_px: int = 2000
 
     def __init__(
         self,
@@ -407,14 +629,9 @@ class PaddleOcrEngine:
         rotate_180: bool = True,
         use_textline_orientation: bool = True,
     ):
-        self.lang = lang
-        self.min_score = min_score
+        super().__init__(lang=lang, min_score=min_score, preprocess=preprocess, rotate_180=rotate_180)
         self.device = device
-        self.preprocess = preprocess
-        self.rotate_180 = rotate_180
         self.use_textline_orientation = use_textline_orientation
-        self._ocr = None
-        self._lock = threading.Lock()
 
     def _resolve_device(self) -> str:
         if self.device:
@@ -472,123 +689,3 @@ class PaddleOcrEngine:
             return _extract_v3_lines(res[0], min_score=self.min_score) if res else []
         res = engine.ocr(rgb_array, cls=False)
         return _extract_v2_lines(res, min_score=self.min_score)
-
-    def ocr_array(self, rgb_array) -> list[OcrLine]:
-        import numpy as np
-
-        engine = self._ensure_ocr()
-        h, w = rgb_array.shape[:2]
-        deskew_meta = None
-        proc = rgb_array
-        if self.preprocess:
-            proc, deskew_meta = preprocess_scan_rgb(rgb_array, deskew=True)
-
-        lines_0 = self._run_raw_ocr(engine, proc)
-        if self.rotate_180 and proc.shape[0] >= 40 and proc.shape[1] >= 40:
-            rot180 = np.ascontiguousarray(proc[::-1, ::-1])
-            ph, pw = proc.shape[:2]
-            raw_180 = self._run_raw_ocr(engine, rot180)
-            mapped_180 = [
-                OcrLine(text=ln.text, box=_rotate_180_box(ln.box, pw, ph), score=ln.score)
-                for ln in raw_180
-            ]
-            lines = _merge_180_lines(lines_0, mapped_180)
-        else:
-            lines = lines_0
-
-        if deskew_meta is not None:
-            angle, cx, cy = deskew_meta
-            lines = [
-                OcrLine(text=ln.text, box=_invert_deskew_box(ln.box, angle, cx, cy, w, h), score=ln.score)
-                for ln in lines
-            ]
-        return lines
-
-    def ocr_image_bytes(self, image_bytes: bytes) -> list[OcrLine]:
-        import numpy as np
-        from PIL import Image
-
-        with Image.open(io.BytesIO(image_bytes)) as img:
-            rgb = img.convert("RGB")
-            w, h = rgb.size
-            if w < 16 or h < 16:
-                return []
-            arr = np.asarray(rgb)
-        return self.ocr_array(arr)
-
-    @staticmethod
-    def _capped_matrix(width: float, height: float, dpi: int, max_side_px: int):
-        import pymupdf
-
-        zoom = dpi / 72.0
-        longest = max(width, height) * zoom
-        if longest > max_side_px and longest > 0:
-            zoom *= max_side_px / longest
-        return pymupdf.Matrix(zoom, zoom)
-
-    def ocr_pdf_page(self, page, dpi: int = 200, max_side_px: int = 2400) -> list[OcrLine]:
-        """Render a PDF page to RGB and map recognized boxes back into PDF page points."""
-        import numpy as np
-
-        mat = self._capped_matrix(page.rect.width, page.rect.height, dpi, max_side_px)
-        pix = page.get_pixmap(matrix=mat, alpha=False)
-        if pix.width < 16 or pix.height < 16:
-            return []
-        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-        if pix.n == 4:
-            arr = arr[:, :, :3]
-        raw_lines = self.ocr_array(arr)
-        sx = page.rect.width / float(pix.width)
-        sy = page.rect.height / float(pix.height)
-        rx0, ry0 = float(page.rect.x0), float(page.rect.y0)
-        return [
-            OcrLine(
-                text=ln.text,
-                box=(rx0 + ln.box[0] * sx, ry0 + ln.box[1] * sy, rx0 + ln.box[2] * sx, ry0 + ln.box[3] * sy),
-                score=ln.score,
-            )
-            for ln in raw_lines
-        ]
-
-    def ocr_pdf_embedded_images(self, page, dpi: int = 200, min_px: int = 40, max_side_px: int = 2000) -> list[OcrLine]:
-        """OCR non-tiny embedded images placed on a PDF page, returning PDF page point coords."""
-        import numpy as np
-        import pymupdf
-
-        lines: list[OcrLine] = []
-        seen_rects: list[tuple[float, float, float, float]] = []
-        for info in page.get_image_info(xrefs=True) or ():
-            bbox = info.get("bbox")
-            if not bbox:
-                continue
-            rect = pymupdf.Rect(bbox) & page.rect
-            if rect.is_empty or rect.width < 20 or rect.height < 20:
-                continue
-            key = (round(rect.x0, 1), round(rect.y0, 1), round(rect.x1, 1), round(rect.y1, 1))
-            if key in seen_rects:
-                continue
-            seen_rects.append(key)
-            mat = self._capped_matrix(rect.width, rect.height, dpi, max_side_px)
-            pix = page.get_pixmap(clip=rect, matrix=mat, alpha=False)
-            if pix.width < min_px or pix.height < min_px:
-                continue
-            arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-            if pix.n == 4:
-                arr = arr[:, :, :3]
-            raw = self.ocr_array(arr)
-            sx = rect.width / float(pix.width)
-            sy = rect.height / float(pix.height)
-            for ln in raw:
-                lines.append(
-                    OcrLine(
-                        text=ln.text,
-                        box=(
-                            rect.x0 + ln.box[0] * sx,
-                            rect.y0 + ln.box[1] * sy,
-                            rect.x0 + ln.box[2] * sx,
-                            rect.y0 + ln.box[3] * sy,
-                        ),
-                        score=ln.score,
-                    )
-                )
-        return lines

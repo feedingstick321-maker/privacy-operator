@@ -81,6 +81,10 @@ def preload_pdf_engine() -> None:
         import paddleocr  # noqa: F401
     except ImportError:
         pass
+    try:
+        import rapidocr  # noqa: F401
+    except ImportError:
+        pass
     import openpyxl  # noqa: F401
     import pymupdf  # noqa: F401
 
