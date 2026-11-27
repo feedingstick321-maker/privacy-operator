@@ -123,12 +123,14 @@ class QwenOllamaEngine:
         host: str = "127.0.0.1",
         python: str | Path | None = None,
         worker: Path | None = None,
+        num_gpu: int | None = None,
     ):
         self.model = model
         self.port = port
         self.host = host
         self.python = str(python or sys.executable)
         self.worker = Path(worker or DEFAULT_WORKER)
+        self.num_gpu = num_gpu
         self.proc: subprocess.Popen | None = None
         self.quantization: str = ""
         self.parameter_size: str = ""
@@ -152,6 +154,8 @@ class QwenOllamaEngine:
             "--port",
             str(self.port),
         ]
+        if self.num_gpu is not None:
+            cmd.extend(["--num-gpu", str(self.num_gpu)])
         env = dict(os.environ)
         env.setdefault("PYTHONUTF8", "1")
         self.proc = subprocess.Popen(

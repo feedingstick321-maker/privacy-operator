@@ -160,3 +160,23 @@ def test_fax_phone_and_doc_number_rules():
 
     acct_cands = format_candidates("입금 계좌: 2025-000236 확인")
     assert any(c.category == ACCOUNT for c in acct_cands)
+
+
+def test_qwen_forwards_num_gpu_flag(tmp_path):
+    worker = tmp_path / "echo_worker.py"
+    worker.write_text(
+        "import json, sys\n"
+        "sys.stdout.buffer.write((json.dumps({'ready': True, 'model': 'qwen3.5:0.8b', 'quantization': 'Q8_0', 'parameter_size': '0.8B'}) + '\\n').encode('ascii'))\n"
+        "sys.stdout.buffer.flush()\n"
+        "for raw in sys.stdin.buffer:\n"
+        "    req = json.loads(raw.decode('utf-8'))\n"
+        "    if '--num-gpu' in sys.argv and '0' in sys.argv:\n"
+        "        sys.stdout.buffer.write((json.dumps({'results': [[{'text': '이서연', 'category': 'name', 'reason': 'ok'}] for _ in req.get('texts', [])]}) + '\\n').encode('ascii'))\n"
+        "    else:\n"
+        "        sys.stdout.buffer.write((json.dumps({'results': [[] for _ in req.get('texts', [])]}) + '\\n').encode('ascii'))\n"
+        "    sys.stdout.buffer.flush()\n",
+        encoding="utf-8",
+    )
+    with QwenOllamaEngine(model="qwen3.5:0.8b", python=sys.executable, worker=worker, num_gpu=0) as eng:
+        out = eng.detect(["강사 이서연"])
+    assert out == [[{"text": "이서연", "category": "name", "reason": "ok"}]]

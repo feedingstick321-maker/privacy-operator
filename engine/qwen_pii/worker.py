@@ -140,21 +140,25 @@ def _check_model(host: str, port: int, model: str) -> tuple[dict | None, str | N
     return None, "MODEL_NOT_FOUND"
 
 
-def _detect_one(host: str, port: int, model: str, text: str) -> list[dict]:
+def _detect_one(host: str, port: int, model: str, text: str, num_gpu: int | None = None) -> list[dict]:
     if not text or not text.strip():
         return []
-    req = {
+    opts: dict[str, object] = {"temperature": 0, "num_ctx": 4096, "num_predict": 512}
+    if num_gpu is not None:
+        opts["num_gpu"] = int(num_gpu)
+    req: dict[str, object] = {
         "model": model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": text},
         ],
         "stream": False,
-        "think": False,
         "keep_alive": "10m",
-        "options": {"temperature": 0, "num_ctx": 4096, "num_predict": 512},
+        "options": opts,
         "format": PII_SCHEMA,
     }
+    if "qwen" in model.lower():
+        req["think"] = False
     resp = _http_json(host, port, "POST", "/api/chat", body=req, timeout=180)
     content = (resp.get("message") or {}).get("content") or "{}"
     try:
@@ -179,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     model = "qwen3.5:4b"
     host = "127.0.0.1"
     port = 11434
+    num_gpu: int | None = None
     i = 0
     while i < len(args):
         if args[i] == "--model" and i + 1 < len(args):
@@ -189,6 +194,9 @@ def main(argv: list[str] | None = None) -> int:
             i += 2
         elif args[i] == "--host" and i + 1 < len(args):
             host = args[i + 1]
+            i += 2
+        elif args[i] == "--num-gpu" and i + 1 < len(args):
+            num_gpu = int(args[i + 1])
             i += 2
         else:
             i += 1
@@ -213,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
                 _send(out, {"ok": True, "model": model})
                 continue
             texts = req.get("texts") or []
-            results = [_detect_one(host, port, model, t) for t in texts]
+            results = [_detect_one(host, port, model, t, num_gpu=num_gpu) for t in texts]
             _send(out, {"results": results})
         except Exception as e:  # noqa: BLE001
             _send(out, {"error": "DETECT_FAILED", "kind": type(e).__name__})
