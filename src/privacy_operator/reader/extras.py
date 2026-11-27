@@ -149,6 +149,7 @@ def pdf_extras(path: Path, blocks: list[Block]) -> list[Block]:
 def pdf_blind_spots(path: Path) -> list[BlindSpot]:
     import pymupdf
 
+    pymupdf.TOOLS.mupdf_display_errors(False)
     out = []
     with pymupdf.open(path) as doc:
         for pno, page in enumerate(doc, start=1):
@@ -160,6 +161,27 @@ def pdf_blind_spots(path: Path) -> list[BlindSpot]:
             else:
                 out.append(BlindSpot(IMAGE, page=pno, detail=str(images)))
     return out
+
+
+def pdf_ocr_and_blind_spots(path: Path, blocks: list[Block], ocr_engine) -> tuple[list[Block], list[BlindSpot]]:
+    """Run PaddleOCR on scanned PDF pages and embedded PDF images, replacing OCR blind spots."""
+    import pymupdf
+    from privacy_operator.reader.ocr import lines_to_blocks
+
+    pymupdf.TOOLS.mupdf_display_errors(False)
+    out = list(blocks)
+    blind: list[BlindSpot] = []
+    with pymupdf.open(path) as doc:
+        for pno, page in enumerate(doc, start=1):
+            if not page.get_images():
+                continue
+            if not page.get_text().strip():
+                lines = ocr_engine.ocr_pdf_page(page)
+                out.extend(lines_to_blocks(lines, pno, "pdf_page", f"ocr-p{pno:03d}"))
+            else:
+                lines = ocr_engine.ocr_pdf_embedded_images(page)
+                out.extend(lines_to_blocks(lines, pno, "pdf_image", f"ocri-p{pno:03d}"))
+    return out, blind
 
 
 def zip_blind_spots(path: Path, fmt: str) -> list[BlindSpot]:

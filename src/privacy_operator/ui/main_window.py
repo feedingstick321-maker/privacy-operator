@@ -652,7 +652,7 @@ class MainWindow(QMainWindow):
 
     def pick_files(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(self, self.voice.t("drop.dialog"), "",
-                                                "HWP, HWPX, PDF, XLSX, XLS (*.hwp *.hwpx *.pdf *.xlsx *.xls)")
+                                                "HWP, HWPX, PDF, PPTX, XLSX, XLS (*.hwp *.hwpx *.pdf *.pptx *.xlsx *.xls)")
         if files:
             self.load_files_async([Path(f) for f in files])
 

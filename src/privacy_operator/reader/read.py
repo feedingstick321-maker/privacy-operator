@@ -20,13 +20,14 @@ from privacy_operator.reader.extras import (
     NEEDS_OCR,
     pdf_blind_spots,
     pdf_extras,
+    pdf_ocr_and_blind_spots,
     xlsx_extras,
     zip_blind_spots,
 )
 
 # 옛 엑셀(.xls)은 엔진이 칸 글자를 읽어 준다. 사본은 읽은 값만 담은 XLSX로 낸다(writer.xlsx.write_xlsx_values).
 # 메모와 문서 속성은 읽지 못하지만 마크다운에도 사본에도 들어가지 않는다(2026-11-15)
-SUPPORTED = {".hwpx": "hwpx", ".hwp": "hwp", ".pdf": "pdf", ".xlsx": "xlsx", ".xls": "xls"}
+SUPPORTED = {".hwpx": "hwpx", ".hwp": "hwp", ".pdf": "pdf", ".xlsx": "xlsx", ".xls": "xls", ".pptx": "pptx"}
 
 # 이미지 바이트는 받지 않는다. OCR은 끈다(모델 내려받기가 필요하고, 오프라인에서 막힌다).
 _PARSE_OPTIONS = {"images": False, "ocr": False}
@@ -40,8 +41,23 @@ class ReadError(RuntimeError):
 
 
 class DocumentReader:
-    def __init__(self, **config_overrides):
-        self._client = KordocClient(make_config(**config_overrides)).start()
+    def __init__(self, *, ocr_enabled: bool = False, ocr_engine=None, **config_overrides):
+        self._config_overrides = config_overrides
+        self._client = None
+        self._ocr_enabled = ocr_enabled
+        self._ocr_engine = ocr_engine
+
+    def _ensure_client(self) -> KordocClient:
+        if self._client is None:
+            self._client = KordocClient(make_config(**self._config_overrides)).start()
+        return self._client
+
+    def _ensure_ocr(self):
+        if self._ocr_engine is None:
+            from privacy_operator.reader.ocr import PaddleOcrEngine
+
+            self._ocr_engine = PaddleOcrEngine()
+        return self._ocr_engine
 
     def __enter__(self) -> DocumentReader:
         return self
@@ -50,24 +66,51 @@ class DocumentReader:
         self.close()
 
     def close(self) -> None:
-        self._client.close()
+        if self._client is not None:
+            self._client.close()
+            self._client = None
 
     def markdown(self, path: str | Path) -> str:
         """엔진의 마크다운(기본 설정). 한글 파일을 쓸 때 이미 켜 둔 엔진을 다시 쓴다(새로 켜면 0.8초)."""
-        return self._client.parse(str(path)).raw.get("markdown") or ""
+        return self._ensure_client().parse(str(path)).raw.get("markdown") or ""
 
     def read(self, path: str | Path) -> ReadResult:
         path = Path(path)
         fmt = SUPPORTED.get(path.suffix.lower())
         if fmt is None:
             raise ReadError(path.suffix.lower().lstrip(".") or "알 수 없는", "UNSUPPORTED_FORMAT")
-        result = self._client.parse(str(path), **_PARSE_OPTIONS)
+        if fmt == "pptx":
+            from privacy_operator.reader.pptx_reader import read_pptx
+
+            try:
+                return read_pptx(path, ocr_engine=self._ensure_ocr() if self._ocr_enabled else None)
+            except Exception:  # noqa: BLE001
+                raise ReadError(fmt, "PPTX_PARSE_FAILED") from None
+
+        result = self._ensure_client().parse(str(path), **_PARSE_OPTIONS)
+        page_count = None
         if not result.success:
-            raise ReadError(fmt, str(result.code or "PARSE_FAILED"))
-        raw = result.raw
-        blocks, blind = convert(raw, fmt)
+            if fmt == "pdf" and self._ocr_enabled:
+                import pymupdf
+
+                pymupdf.TOOLS.mupdf_display_errors(False)
+                with pymupdf.open(path) as doc:
+                    page_count = len(doc)
+                blocks, blind = [], []
+            else:
+                raise ReadError(fmt, str(result.code or "PARSE_FAILED"))
+        else:
+            raw = result.raw
+            page_count = raw.get("pageCount")
+            blocks, blind = convert(raw, fmt)
         try:
-            blocks, blind = self._extras(path, fmt, blocks, blind)
+            blocks, blind = self._extras(
+                path,
+                fmt,
+                blocks,
+                blind,
+                ocr_engine=self._ensure_ocr() if self._ocr_enabled else None,
+            )
         except ReadError:
             raise
         except Exception:  # noqa: BLE001
@@ -75,10 +118,10 @@ class DocumentReader:
             # 넘기지 않고 읽지 못한 문서로 돌린다. 화면까지 오류가 올라가 프로그램이 꺼지던 것을 막는다(2026-11-11)
             raise ReadError(fmt, "EXTRAS_FAILED") from None
         return ReadResult(source_name=path.name, format=fmt, blocks=blocks, blind_spots=_unique(blind),
-                          page_count=raw.get("pageCount"))
+                          page_count=page_count)
 
     @staticmethod
-    def _extras(path: Path, fmt: str, blocks: list, blind: list) -> tuple[list, list]:
+    def _extras(path: Path, fmt: str, blocks: list, blind: list, ocr_engine=None) -> tuple[list, list]:
         if fmt == "xlsx":
             blocks = xlsx_extras(path, blocks)
             blind += zip_blind_spots(path, fmt)
@@ -88,7 +131,11 @@ class DocumentReader:
             blocks = pdf_extras(path, blocks)
             # PDF는 쪽마다 직접 본 결과로 kordoc의 OCR 판정과 이미지 표시를 바꾼다
             blind = [b for b in blind if b.kind not in (NEEDS_OCR, IMAGE) and b.detail != "NEEDS_OCR"]
-            blind += pdf_blind_spots(path)
+            if ocr_engine is not None:
+                blocks, ocr_blind = pdf_ocr_and_blind_spots(path, blocks, ocr_engine)
+                blind += ocr_blind
+            else:
+                blind += pdf_blind_spots(path)
         return blocks, blind
 
 

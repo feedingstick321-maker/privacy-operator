@@ -18,7 +18,7 @@ from privacy_operator.reader.blocks import BlindSpot
 from privacy_operator.reader.extras import IMAGE, NEEDS_OCR
 
 SHOWABLE = (".png", ".jpg", ".jpeg", ".gif", ".bmp")
-_MEDIA_DIR = {"xlsx": "xl/media/", "hwpx": "BinData/"}
+_MEDIA_DIR = {"xlsx": "xl/media/", "hwpx": "BinData/", "pptx": "ppt/media/"}
 PAGE_WIDTH = 1100  # PDF 쪽을 그릴 때의 가로 픽셀(화면에서 줄여 보여 준다)
 
 

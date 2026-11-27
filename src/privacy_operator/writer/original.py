@@ -25,7 +25,7 @@ from privacy_operator.writer.xmlsweep import decode_text, text_segments
 log = logging.getLogger(__name__)
 
 # 옛 엑셀(.xls)은 읽은 값만 담은 XLSX로 낸다(서식과 수식은 옮기지 못한다, 2026-11-15 사용자 결정)
-OUTPUT_SUFFIX = {"hwpx": ".hwpx", "hwp": ".hwpx", "pdf": ".pdf", "xlsx": ".xlsx", "xls": ".xlsx"}
+OUTPUT_SUFFIX = {"hwpx": ".hwpx", "hwp": ".hwpx", "pdf": ".pdf", "xlsx": ".xlsx", "xls": ".xlsx", "pptx": ".pptx"}
 _BINARY = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".emf", ".wmf", ".bin", ".ole", ".ttf", ".otf")
 _GAP = "\x00"  # 글 조각을 이을 때 사이에 끼우는 글자. 숫자도 공백도 아니고 문서 글에 나오지 않는다
 # 재검사는 남은 것이 하나라도 있으면 그 사본을 버린다. 곳마다 이만큼 찾으면 더 찾지 않는다(기록용으로는 충분하다)
@@ -105,6 +105,8 @@ def _place(block) -> str:
     if block.kind == "metadata":
         return f"문서 속성({loc.field})"
     where = f"{loc.cell} 칸" if loc.cell else (f"{loc.page}쪽" if loc.page else block.block_id)
+    if block.kind == "ocr":
+        return f"{where} 이미지(OCR)"
     return f"메모({where})" if block.kind == "comment" else where
 
 
@@ -134,10 +136,20 @@ def _cell_texts(src: Path, reader) -> dict[tuple[str, str], str]:
             if b.kind == "cell" and b.location.sheet and b.location.cell}
 
 
-def write_original(src: Path, fmt: str, plan: ReplacementPlan, out_dir: Path, stem: str, reader) -> OriginalOutput:
+def write_original(
+    src: Path,
+    fmt: str,
+    plan: ReplacementPlan,
+    out_dir: Path,
+    stem: str,
+    reader,
+    ocr_blocks: list | None = None,
+    redact_style: str = "black_alias",
+) -> OriginalOutput:
     """src를 원본 형식으로 가명처리해 out_dir/<stem><확장자>에 둔다. 검사를 통과할 때만."""
     from privacy_operator.writer.hwpx import write_hwpx
     from privacy_operator.writer.pdf import write_pdf
+    from privacy_operator.writer.pptx import write_pptx
     from privacy_operator.writer.xlsx import write_xlsx, write_xlsx_values
 
     if fmt not in OUTPUT_SUFFIX or (fmt == "xls" and reader is None):
@@ -150,7 +162,9 @@ def write_original(src: Path, fmt: str, plan: ReplacementPlan, out_dir: Path, st
             if fmt in ("hwpx", "hwp"):
                 write_hwpx(src, staged, plan, work, is_hwp=(fmt == "hwp"), reader=reader)
             elif fmt == "pdf":
-                write_pdf(src, staged, plan)
+                write_pdf(src, staged, plan, ocr_blocks=ocr_blocks, redact_style=redact_style)
+            elif fmt == "pptx":
+                write_pptx(src, staged, plan, ocr_blocks=ocr_blocks, redact_style=redact_style)
             elif fmt == "xls":
                 write_xlsx_values(reader.read(src).blocks, staged, plan)
             else:

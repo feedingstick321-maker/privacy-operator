@@ -2,9 +2,22 @@
 
 개인정보가 담긴 업무 문서를 **AI에 올리기 전에**, 내 컴퓨터 안에서 이름과 연락처 같은 개인정보를 찾아 `[이름-01]` 같은 가명코드로 바꿉니다. AI 작업이 끝난 결과물을 다시 넣으면 가명코드를 원래 이름으로 되돌립니다.
 
-- 한글(HWP, HWPX), PDF, 엑셀(XLSX, XLS)을 넣을 수 있습니다.
+- 한글(HWP, HWPX), PDF(텍스트 PDF + 스캔/통짜 이미지 PDF), 파워포인트(PPTX + 슬라이드 내장 이미지), 엑셀(XLSX, XLS)을 넣을 수 있습니다.
 - 인터넷에 연결하지 않습니다. 문서는 내 컴퓨터 밖으로 나가지 않습니다.
 - 원본 파일은 바꾸지 않고 항상 새 파일을 만듭니다.
+
+## 포크 확장 기능 (이미지 PDF / PPTX + PaddleOCR + 로컬 Qwen3.5 4B)
+
+이 포크는 강의안(`PDF`, `PPTX`) 사전 검열 시 스캔된 통짜 이미지 PDF나 슬라이드 스크린샷 속 개인정보까지 놓치지 않도록 다음 기능을 추가했습니다:
+
+1. **통짜 이미지 PDF 및 혼합 PDF OCR (`PaddleOCR`)**: 선택 가능한 텍스트가 없는 스캔 페이지와 본문 속 삽입 이미지를 자동 OCR하고, `PyMuPDF` `PDF_REDACT_IMAGE_PIXELS`로 이미지 아래 픽셀을 물리적으로 영구 삭제한 뒤 가명코드를 덮어씁니다.
+2. **PPTX 슬라이드 / 표 / 발표자 노트 / 내장 이미지 마스킹 (`python-pptx` + `Pillow`)**: 슬라이드 텍스트, 그룹 도형, 표, 노트, 문서 속성(`author` 등)을 치환하고 내장 이미지 속 개인정보 좌표를 픽셀 단위로 가립니다.
+3. **로컬 Ollama Qwen3.5 4B (`Q4_K_M`) 문맥 정찰**: `127.0.0.1` 루프백 감사 훅이 걸린 격리 워커(`engine/qwen_pii/worker.py`)로 로컬 `qwen3.5:4b`를 호출해(`think: false`, JSON Schema 강제) 규칙과 OCR이 찾은 문맥 속 개인정보를 추가 탐지합니다.
+4. **CLI 사전검열/일괄 마스킹 (`privacy-operator-cli`)**:
+   ```powershell
+   .venv\Scripts\python -m privacy_operator.cli scan "강의안폴더" --ext pdf pptx
+   .venv\Scripts\python -m privacy_operator.cli redact "강의안.pdf" -o "강의안_masked.pdf" --verify-ocr
+   ```
 
 Microsoft Store에서도 받을 수 있습니다. Store판과 아래 설치 파일판은 같은 프로그램이고, 다른 점은 [AI 정찰 모델](#ai-정찰-모델-선택)을 설치할 수 있느냐 하나입니다.
 

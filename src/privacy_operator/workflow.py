@@ -16,6 +16,7 @@ from privacy_operator.alias.codes import AliasBook, value_key
 from privacy_operator.alias.pseudonymize import preview_codes, pseudonymize
 from privacy_operator.alias.vault import UnlockedVault
 from privacy_operator.detect import detect, escalate, rescan
+from privacy_operator.detect.ai.qwen_ollama import QwenOllamaEngine, QwenOllamaError, QwenReport, find_pii_qwen
 from privacy_operator.detect.ai.schift import SchiftEngine, SchiftError, SchiftReport, find_names, is_installed
 from privacy_operator.detect.ai.spans import is_ai
 from privacy_operator.detect.detector import find_value
@@ -35,7 +36,7 @@ from privacy_operator.detect.patterns import fold, value_pattern
 from privacy_operator.mission.package import ProcessingRecord, agent_rules_text, build_package
 from privacy_operator.mission.results import ResultFile, RestoredFile, find_results, restore_result
 from privacy_operator.reader import DocumentReader, ReadError, ReadResult
-from privacy_operator.reader.blocks import BlindSpot
+from privacy_operator.reader.blocks import OCR, BlindSpot
 from privacy_operator.reader.read import SUPPORTED
 from privacy_operator.settings import Settings
 from privacy_operator.writer.original import OriginalOutput
@@ -88,6 +89,7 @@ class AiRun:
     findings: list[Finding]
     errors: list[str]  # 오류 코드(예: SCHIFT_NOT_INSTALLED). 원문 없음
     schift: SchiftReport | None = None
+    qwen: QwenReport | None = None
     cancelled: bool = False
 
     def __repr__(self) -> str:
@@ -128,7 +130,10 @@ class MissionWorkflow:
     def _ensure_reader(self) -> DocumentReader:
         with self._reader_lock:
             if self._reader is None:
-                self._reader = self._reader_factory()
+                if self._reader_factory is DocumentReader:
+                    self._reader = DocumentReader(ocr_enabled=self.settings.ocr_enabled)
+                else:
+                    self._reader = self._reader_factory()
             return self._reader
 
     def warm_up(self) -> None:
@@ -227,7 +232,7 @@ class MissionWorkflow:
     # ---------------------------------------------------------------- AI 탐지(9단계, 선택)
 
     def ai_enabled(self) -> bool:
-        return self.settings.ai_schift
+        return bool(self.settings.ai_schift or self.settings.ai_qwen)
 
     def ai_pending_docs(self) -> list[int]:
         """AI 탐지를 아직 하지 않은 문서 순번."""
@@ -249,9 +254,21 @@ class MissionWorkflow:
                 with SchiftEngine() as engine:
                     new, run.schift = find_names(self.results, existing, engine, docs, progress, cancelled)
                 run.findings += new
+                existing = existing + new
             except SchiftError as e:
                 run.errors.append(e.code)
                 log.warning("AI 탐지(schift) 실패: %s", e.code)
+        if self.settings.ai_qwen and not (cancelled and cancelled()):
+            try:
+                with QwenOllamaEngine(
+                    model=self.settings.ai_qwen_model,
+                    port=self.settings.ai_qwen_port,
+                ) as engine:
+                    new_q, run.qwen = find_pii_qwen(self.results, existing, engine, docs, progress, cancelled)
+                run.findings += new_q
+            except QwenOllamaError as e:
+                run.errors.append(e.code)
+                log.warning("AI 탐지(Qwen) 실패: %s", e.code)
         run.cancelled = bool(cancelled and cancelled())
         return run
 
@@ -428,10 +445,12 @@ class MissionWorkflow:
             self.vault.save_mapping(mission_id, book.to_mapping())
             policy = "continued" if self.settings.alias_continue else "per_mission"
             self.originals = []
+            ocr_by_doc = [[b for b in r.blocks if b.kind == OCR] for r in self.results]
             self.package_path = build_package(self.settings, mission_id, docs, self.findings, book, self.vault,
                                               record=record, alias_policy=policy, sources=self.paths,
                                               reader=self._reader, originals=self.originals,
-                                              no_original=set(self.markdown_docs))
+                                              no_original=set(self.markdown_docs),
+                                              ocr_blocks_by_doc=ocr_by_doc)
         except BaseException:
             # 송출이 멈추면(차단 목록 등) 번호와 대응표를 반납한다. 남겨 두면 복원 목록에 빈 작전이 생기고
             # 다시 개시할 때 번호가 -02로 넘어간다(2026-11-08)

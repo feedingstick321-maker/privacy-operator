@@ -14,6 +14,7 @@ HEADING = "heading"
 CELL = "cell"
 METADATA = "metadata"
 COMMENT = "comment"  # 한글 메모, 엑셀 셀 메모, PDF 주석
+OCR = "ocr"  # 이미지/스캔 PDF 쪽 및 PPTX 내장 그림 OCR 텍스트
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,9 @@ class Location:
     cell: str | None = None  # XLSX 셀 주소(A1)
     field: str | None = None  # 문서 속성 이름, 메모의 text/author
     bbox: tuple[float, float, float, float] | None = None  # PDF (x, y, 너비, 높이), kordoc 좌표
+    ocr_source: str | None = None  # "pdf_page", "pdf_image", "pptx_media"
+    media_path: str | None = None  # PPTX zip 내 이미지 경로 (예: "ppt/media/image1.png")
+    ocr_boxes: tuple[tuple[int, int, float, float, float, float], ...] = ()  # (char_start, char_end, x0, y0, x1, y1)
 
 
 @dataclass(frozen=True)

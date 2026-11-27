@@ -16,9 +16,15 @@ dependencies = [
     "cryptography",
     "keyring",  # '이 컴퓨터에서 기억하기': Windows 자격 증명 관리자
     "kordoc==0.2.1",  # 엔진(npm kordoc)은 engine/에 따로 설치한다
+    "python-pptx",
+    "pillow",
 ]
 
 [project.optional-dependencies]
+ocr = [
+    "paddlepaddle",
+    "paddleocr",
+]
 dev = [
     "pytest",
     "pytest-qt",
@@ -30,6 +36,7 @@ dev = [
 
 [project.scripts]
 privacy-operator = "privacy_operator.__main__:main"
+privacy-operator-cli = "privacy_operator.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

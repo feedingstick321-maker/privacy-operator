@@ -51,6 +51,12 @@ class Settings:
     alias_continue: bool = False
     # 9단계 AI 탐지(선택). 꺼 두는 것이 기본
     ai_schift: bool = False  # 이름과 주소를 Schift 모델로 더 찾기
+    # 포크 확장(강의안 이미지 PDF / PPTX OCR + 로컬 Ollama Qwen3.5 4B Q4_K_M)
+    ocr_enabled: bool = False  # PaddleOCR로 통짜 이미지 PDF / PPTX 내장 그림 읽기
+    ai_qwen: bool = False  # 로컬 Ollama Qwen3.5 4B로 개인정보 추가 정찰
+    ai_qwen_model: str = "qwen3.5:4b"
+    ai_qwen_port: int = 11434
+    redact_style: str = "black_alias"  # black_alias | black_only | white_alias
 
     def __post_init__(self):
         self.vault_dir = self.vault_dir or str(_documents() / "작전실금고")

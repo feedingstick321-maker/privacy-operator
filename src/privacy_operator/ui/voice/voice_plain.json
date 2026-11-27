@@ -38,7 +38,7 @@
   "nav.restore": "복원",
   "nav.settings": "설정",
   "drop.title": "문서를 여기에 끌어다 놓으세요",
-  "drop.hint": "HWP, HWPX, PDF, XLSX, XLS. 원본은 바꾸지 않고 새 파일을 만듭니다.",
+  "drop.hint": "HWP, HWPX, PDF, PPTX, XLSX, XLS. 원본은 바꾸지 않고 새 파일을 만듭니다.",
   "drop.button": "파일 고르기",
   "drop.dialog": "불러올 문서 고르기",
   "col.type": "유형",
@@ -266,5 +266,17 @@
   "settings.version_beta": "{v} 베타",
   "settings.license": "라이선스",
   "settings.license_note": "GNU AGPL-3.0으로 공개한 무료 프로그램입니다. 보증 없이 제공하며, 같은 조건으로 고치거나 나눠 줄 수 있습니다. 소스: github.com/amberdrops/privacy-operator",
-  "settings.license_view": "라이선스 보기"
+  "settings.license_view": "라이선스 보기",
+  "by.ai_qwen": "AI(Qwen3.5 4B)",
+  "ai.error.OLLAMA_UNREACHABLE": "로컬 Ollama 서버에 연결할 수 없습니다.",
+  "ai.error.MODEL_NOT_FOUND": "로컬 Ollama에서 Qwen3.5 모델을 찾지 못했습니다.",
+  "ai.error.DETECT_FAILED": "Qwen3.5 탐지 중 오류가 생겼습니다.",
+  "settings.sec_ocr": "이미지 OCR 및 로컬 Qwen",
+  "settings.ocr_enabled": "통짜 이미지 PDF 및 PPTX 그림 OCR 켜기 (PaddleOCR)",
+  "settings.ai_qwen": "로컬 Ollama Qwen3.5 4B로 개인정보 추가 탐지",
+  "settings.ai_qwen_model": "Ollama 모델 이름",
+  "settings.redact_style": "이미지 가림 방식",
+  "redact.black_alias": "검은 가림 + 코드명",
+  "redact.black_only": "검은 가림만",
+  "redact.white_alias": "흰 바탕 + 코드명"
 }

@@ -307,6 +307,7 @@ class SettingsDialog(_Dialog):
         self.theme = self._choice("settings.theme",
                                   [(voice.t(load_theme(n).label_key), n) for n in available_themes()], settings.theme)
         self.voice_box = self._choice("settings.voice", [(voice.t(f"voice.{n}"), n) for n in VOICES], settings.voice)
+        self._ocr_section(settings)
         self._ai_section(settings)
         self._about_section()
         self.error = QLabel()
@@ -324,6 +325,25 @@ class SettingsDialog(_Dialog):
         margins = self.layout().contentsMargins()
         want = body.sizeHint().height() + 72 + margins.top() + margins.bottom() + self.layout().spacing()
         self.resize(max(self.minimumWidth(), body.sizeHint().width() + 60), min(want, int(screen.height() * 0.9)))
+
+    def _ocr_section(self, settings: Settings) -> None:
+        self._section("settings.sec_ocr")
+        self.ocr_enabled = QCheckBox()
+        self.binder.text(self.ocr_enabled, "settings.ocr_enabled", tip=False)
+        self.ocr_enabled.setChecked(settings.ocr_enabled)
+        self._row(None, self.ocr_enabled)
+        self.ai_qwen = QCheckBox()
+        self.binder.text(self.ai_qwen, "settings.ai_qwen", tip=False)
+        self.ai_qwen.setChecked(settings.ai_qwen)
+        self._row(None, self.ai_qwen)
+        self.qwen_model_edit = QLineEdit(settings.ai_qwen_model)
+        self._row("settings.ai_qwen_model", self.qwen_model_edit)
+        styles = [
+            (self.voice.t("redact.black_alias"), "black_alias"),
+            (self.voice.t("redact.black_only"), "black_only"),
+            (self.voice.t("redact.white_alias"), "white_alias"),
+        ]
+        self.redact_style = self._choice("settings.redact_style", styles, settings.redact_style)
 
     def _about_section(self) -> None:
         """판과 라이선스. 화면이 있는 AGPL 프로그램은 저작권, 보증 없음, 같은 조건으로 나눠 줄 수 있음,
@@ -493,7 +513,11 @@ class SettingsDialog(_Dialog):
                       remember_password=self.remember.isChecked(), retention_days=self.retention.value(),
                       theme=self.theme.currentData(), voice=self.voice_box.currentData(),
                       alias_continue=self.alias_continue.isChecked(),
-                      ai_schift=bool(self.ai_schift and self.ai_schift.isChecked()))  # 모델이 없으면 끈다
+                      ai_schift=bool(self.ai_schift and self.ai_schift.isChecked()),  # 모델이 없으면 끈다
+                      ocr_enabled=self.ocr_enabled.isChecked(),
+                      ai_qwen=self.ai_qwen.isChecked(),
+                      ai_qwen_model=(self.qwen_model_edit.text().strip() or self.settings.ai_qwen_model),
+                      redact_style=self.redact_style.currentData())
         try:
             validate_paths(new)
         except SettingsError as e:

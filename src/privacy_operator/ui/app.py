@@ -68,13 +68,25 @@ def preload_pdf_engine() -> None:
         import numpy  # noqa: F401
     except ImportError:
         pass
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        pass
+    try:
+        import paddle  # noqa: F401
+        import paddleocr  # noqa: F401
+    except ImportError:
+        pass
     import openpyxl  # noqa: F401
     import pymupdf  # noqa: F401
 
+    import privacy_operator.reader.ocr  # noqa: F401
+    import privacy_operator.reader.pptx_reader  # noqa: F401
     import privacy_operator.restore.zipdoc  # noqa: F401
     import privacy_operator.writer.hwpx  # noqa: F401
     import privacy_operator.writer.original  # noqa: F401
     import privacy_operator.writer.pdf  # noqa: F401
+    import privacy_operator.writer.pptx  # noqa: F401
     import privacy_operator.writer.xlsx  # noqa: F401
 
 

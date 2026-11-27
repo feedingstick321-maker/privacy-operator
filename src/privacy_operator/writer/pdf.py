@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pymupdf
 
+from privacy_operator.reader.blocks import OCR, Block
+from privacy_operator.reader.ocr import rects_for_span
 from privacy_operator.writer.plan import ReplacementPlan
 
 MALGUN = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / "malgun.ttf"
@@ -42,11 +44,65 @@ def _page_chars(page) -> tuple[str, list]:
     return "".join(text), chars
 
 
-def write_pdf(src: Path, dst: Path, plan: ReplacementPlan) -> None:
+def _ocr_redact_page(
+    page,
+    blocks: list[Block],
+    plan: ReplacementPlan,
+    font_args: dict,
+    font: pymupdf.Font,
+    redact_style: str,
+) -> None:
+    """Physically erase image pixels under OCR-matched PII and optionally draw alias text."""
+    fill = (1, 1, 1) if redact_style == "white_alias" else (0, 0, 0)
+    txt_color = (0, 0, 0) if redact_style == "white_alias" else (1, 1, 1)
+    writes: list[tuple[pymupdf.Rect, str]] = []
+    for blk in blocks:
+        if not blk.location.ocr_boxes:
+            continue
+        for s, e, i in plan.pick(blk.text, wrapped=True):
+            replacement = plan.rules[i].replacement
+            rects = rects_for_span(blk, s, e, pad_x=2.5, pad_y=1.5)
+            first = True
+            for rx0, ry0, rx1, ry1 in rects:
+                rect = pymupdf.Rect(rx0, ry0, rx1, ry1) & page.rect
+                if rect.is_empty:
+                    continue
+                page.add_redact_annot(rect, fill=fill)
+                if first:
+                    writes.append((rect, replacement))
+                    first = False
+    if not writes:
+        return
+    page.apply_redactions(
+        images=pymupdf.PDF_REDACT_IMAGE_PIXELS,
+        graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
+        text=pymupdf.PDF_REDACT_TEXT_REMOVE,
+    )
+    if redact_style != "black_only":
+        for rect, replacement in writes:
+            width = font.text_length(replacement, fontsize=1) or 1.0
+            fs = max(MIN_FONT, min(rect.height * 0.72, rect.width / width))
+            baseline_y = min(rect.y1 - 1.5, rect.y0 + (rect.height + fs * 0.75) / 2.0)
+            page.insert_text((rect.x0 + 1.0, baseline_y), replacement, fontsize=fs, color=txt_color, **font_args)
+
+
+def write_pdf(
+    src: Path,
+    dst: Path,
+    plan: ReplacementPlan,
+    ocr_blocks: list[Block] | None = None,
+    redact_style: str = "black_alias",
+) -> None:
     font_args, font = _font()
+    pymupdf.TOOLS.mupdf_display_errors(False)
+    ocr_by_page: dict[int, list[Block]] = {}
+    for blk in ocr_blocks or ():
+        if blk.kind == OCR and blk.location.page is not None:
+            ocr_by_page.setdefault(blk.location.page, []).append(blk)
+
     doc = pymupdf.open(src)
     try:
-        for page in doc:
+        for pno, page in enumerate(doc, start=1):
             text, chars = _page_chars(page)
             writes = []
             # 쪽 글에는 줄마다 줄바꿈이 들어가 있어 줄에 걸친 값도 찾는다
@@ -73,6 +129,10 @@ def write_pdf(src: Path, dst: Path, plan: ReplacementPlan) -> None:
                     width = font.text_length(replacement, fontsize=1) or 1
                     fs = max(MIN_FONT, min(size, rect.width / width))
                     page.insert_text((rect.x0, origin[1]), replacement, fontsize=fs, **font_args)
+
+            if pno in ocr_by_page:
+                _ocr_redact_page(page, ocr_by_page[pno], plan, font_args, font, redact_style)
+
             for annot in page.annots() or []:
                 info = annot.info
                 new = {k: plan.replace(info.get(k) or "") for k in ("content", "title", "subject")}
