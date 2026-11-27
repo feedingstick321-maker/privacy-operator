@@ -81,11 +81,20 @@ _AREA = r"(?:2|3[1-3]|4[1-4]|5[1-5]|6[1-4]|70)"
 MOBILE_RE = re.compile(rf"(?<![\d-])01[016789]{_PSEP}?\d{{3,4}}{_PSEP}?\d{{4}}(?![\d-])")
 LANDLINE_RE = re.compile(
     rf"(?<![\d-])(?:\(0{_AREA}\)\s?|0{_AREA}{_PSEP})\d{{3,4}}{_PSEP}\d{{4}}(?![\d-])")
+LANDLINE_PLAIN_RE = re.compile(
+    rf"(?<!\d)(0(?:2|3[1-3]|4[1-4]|5[1-5]|6[1-4]|70)\d{{7,8}})(?!\d)")
+FAX_PHONE_RE = re.compile(
+    rf"(?:FAX|TEL|팩스|전화|연락처)\s*[:：.]?\s*(0{_AREA}\s?[-.)]?\s?\d{{7,8}})(?![\d-])",
+    re.IGNORECASE,
+)
 INTL_PHONE_RE = re.compile(
     rf"(?<![\d+])\+82[-.\s]?(?:\(0\)[-.\s]?)?(?:1[016789]|{_AREA})[-.\s]?\d{{3,4}}[-.\s]?\d{{4}}(?![\d-])")
 REPRESENTATIVE_RE = re.compile(r"(?<![\d-])1[5-9]\d{2}-\d{4}(?![\d-])")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
 ACCOUNT_RE = re.compile(r"(?<![\d-])\d{2,6}(?:-\d{2,7}){1,4}(?![\d-])")
+_DOC_NO_BEFORE_RE = re.compile(r"(?:제|발급번호|교부번호|문서번호|등록번호|공고번호|증명번호)\s*[:：]?\s*$")
+_DOC_NO_AFTER_RE = re.compile(r"^\s*호(?![가-힣])")
+_YEAR_DOC_NO_RE = re.compile(r"^(?:19|20)\d{2}-\d{6}$")
 ACCOUNT_PLAIN_RE = re.compile(r"(?<![\d-])\d{10,14}(?![\d-])")  # 구분자 없는 계좌. 은행 문맥이 있을 때만 본다
 ACCOUNT_CONTEXT_RE = re.compile(r"계좌|은행|입금|예금주|뱅크|송금|농협|신협|수협|우체국|새마을금고")
 # 흔한 낱말이기도 한 은행 이름(국민, 우리, 하나 …)은 번호 바로 앞이나 바로 뒤(`(신한)`)에 붙었을 때만 문맥으로 본다
@@ -198,6 +207,11 @@ def format_candidates(text: str, header_category: str | None = None) -> list[Can
     for regex in (INTL_PHONE_RE, MOBILE_RE, LANDLINE_RE):
         for m in regex.finditer(text):
             add(m, PHONE, TIER_CERTAIN)
+    for m in FAX_PHONE_RE.finditer(text):
+        add(m, PHONE, TIER_CERTAIN, group=1)
+    for m in LANDLINE_PLAIN_RE.finditer(text):
+        if header_category != ACCOUNT and not _bank_context(text, m.start(), m.end()):
+            add(m, PHONE, TIER_CERTAIN, group=1)
     for m in REPRESENTATIVE_RE.finditer(text):
         add(m, PHONE, TIER_REVIEW, exclude_hint=HINT_REPRESENTATIVE)
     for m in LICENSE_RE.finditer(text):
@@ -216,6 +230,12 @@ def format_candidates(text: str, header_category: str | None = None) -> list[Can
         if not 10 <= digits <= 16:
             continue
         sure = header_category == ACCOUNT or _bank_context(text, m.start(), m.end())
+        if not sure and (
+            _DOC_NO_BEFORE_RE.search(text[max(0, m.start() - 12): m.start()])
+            or _DOC_NO_AFTER_RE.match(text, m.end(), m.end() + 4)
+            or _YEAR_DOC_NO_RE.match(m.group())
+        ):
+            continue
         add(m, ACCOUNT, TIER_CERTAIN if sure else TIER_REVIEW)
     for m in ACCOUNT_PLAIN_RE.finditer(text):
         if header_category == ACCOUNT or _bank_context(text, m.start(), m.end()):

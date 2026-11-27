@@ -11,10 +11,16 @@ from pathlib import Path
 import pytest
 
 from privacy_operator.detect import detect
-from privacy_operator.detect.ai.qwen_ollama import QwenOllamaEngine, QwenOllamaError, find_pii_qwen
+from privacy_operator.detect.ai.qwen_ollama import (
+    QwenOllamaEngine,
+    QwenOllamaError,
+    _is_qwen_false_positive,
+    find_pii_qwen,
+)
 from privacy_operator.detect.ai.spans import is_ai
-from privacy_operator.detect.dictionaries import ADDRESS, NAME, OTHER
+from privacy_operator.detect.dictionaries import ACCOUNT, ADDRESS, NAME, OTHER, PHONE
 from privacy_operator.detect.finding import BY_AI_QWEN, STATUS_PENDING, TIER_REVIEW
+from privacy_operator.detect.patterns import format_candidates
 from privacy_operator.reader.blocks import OCR, Location, Block, ReadResult
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -108,3 +114,49 @@ def test_qwen_unreachable_raises_clean_code():
     with pytest.raises(QwenOllamaError) as exc:
         QwenOllamaEngine(model="qwen3.5:4b", port=59999).start()
     assert exc.value.code == "OLLAMA_UNREACHABLE"
+
+
+def test_qwen_false_positive_filter():
+    sample_doc = "성명 한글 입사일자 이하 여백 2025.07.24. 생년월일: 1990.05.12. J100000604-2025-000638 (주)퍼플아카데미 매교초등학 김미리 조연기 손지현 2024123456"
+    for blocked_cat, val in [
+        (OTHER, "성명"),
+        (NAME, "한글"),
+        (OTHER, "입사일자"),
+        (NAME, "이하 여백"),
+        (OTHER, "2025.07.24."),
+        (OTHER, "J100000604-2025-000638"),
+        (OTHER, "(주)퍼플아카데미"),
+        (OTHER, "매교초등학"),
+        (OTHER, "동백고"),
+        (OTHER, "대체강사"),
+        (NAME, "ㄱㄴi"),
+        (OTHER, "162"),
+    ]:
+        val_doc = sample_doc + " 동백고 대체강사"
+        idx = val_doc.find(val) if val in val_doc else 0
+        assert _is_qwen_false_positive(blocked_cat, val, val_doc, idx, idx + len(val)), f"should block {val}"
+
+    for allowed_cat, val in [
+        (NAME, "김미리"),
+        (NAME, "조연기"),
+        (NAME, "손지현"),
+        (OTHER, "1990.05.12."),
+        (OTHER, "2024123456"),
+    ]:
+        idx = sample_doc.find(val)
+        assert idx >= 0
+        assert not _is_qwen_false_positive(allowed_cat, val, sample_doc, idx, idx + len(val)), f"should keep {val}"
+
+
+def test_fax_phone_and_doc_number_rules():
+    fax_cands = format_candidates("19/08 2025 FAX 031 4654298")
+    assert any(c.category == PHONE for c in fax_cands)
+
+    garbled_fax_cands = format_candidates("19/082025-1-1:08ME8X-0314654298")
+    assert any(c.category == PHONE for c in garbled_fax_cands)
+
+    doc_cands = format_candidates("발급번호 제 2025-000236 호\n발급일 2026-000442")
+    assert not any(c.category == ACCOUNT for c in doc_cands)
+
+    acct_cands = format_candidates("입금 계좌: 2025-000236 확인")
+    assert any(c.category == ACCOUNT for c in acct_cands)

@@ -73,6 +73,10 @@ def preload_pdf_engine() -> None:
     except ImportError:
         pass
     try:
+        import cv2  # noqa: F401
+    except ImportError:
+        pass
+    try:
         import paddle  # noqa: F401
         import paddleocr  # noqa: F401
     except ImportError:

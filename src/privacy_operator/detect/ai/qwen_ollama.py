@@ -18,10 +18,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from privacy_operator.detect.ai.spans import AiSpan, to_findings
-from privacy_operator.detect.dictionaries import ACCOUNT, ADDRESS, EMAIL, NAME, OTHER, PHONE
+from privacy_operator.detect.dictionaries import ACCOUNT, ADDRESS, EMAIL, NAME, OTHER, PHONE, looks_like_name
 from privacy_operator.detect.finding import BY_AI_QWEN, TIER_REVIEW, Finding
 from privacy_operator.detect.patterns import fold
-from privacy_operator.detect.rules import trim_name_span
+from privacy_operator.detect.rules import is_role_word, trim_name_span
 from privacy_operator.reader.blocks import METADATA, OCR, ReadResult
 
 log = logging.getLogger(__name__)
@@ -41,6 +41,57 @@ CATEGORY_MAP = {
 }
 
 _SKIP_META_FIELDS = frozenset({"creationdate", "moddate", "producer", "creator", "format", "encryption", "trapped"})
+
+_QWEN_LABEL_STOPWORDS = frozenset({
+    "성명", "한글", "한자", "생년월일", "주소", "전화번호", "연락처", "팩스", "담당자",
+    "교부번호", "발급번호", "문서번호", "등록번호", "입사일자", "퇴사일자", "근무기간",
+    "근무처", "소속", "직위", "직종", "이하여백", "해당없음", "공란", "기초학력",
+    "기간제교사", "원본대조필", "직인생략", "경력증명서", "재직증명서", "확인자",
+    "작성자", "발급자", "대표자",
+})
+_ORG_CORP_SUFFIXES = (
+    "초등학교", "중학교", "고등학교", "초등학", "중학", "고등학", "대학교",
+    "아카데미", "교육청", "교육지원청", "지원청", "주식회사",
+)
+_ORG_SHORT_RE = re.compile(r"^[가-힣]{2,}(?:초|중|고)$")
+_JAMO_RE = re.compile(r"[ㄱ-ㅎㅏ-ㅣ]")
+_CERT_ID_RE = re.compile(r"^(?:[A-Z]\d{8,}-\d{4}-\d+|(?:19|20)\d{2}-\d{3,6}|\d{1,4})$")
+_STANDALONE_DATE_RE = re.compile(r"^(?:19|20)?\d{2}\s*[./년-]\s*\d{1,2}\s*[./월-]\s*\d{1,2}\s*[.일]?$")
+_BIRTH_BEFORE_RE = re.compile(r"(?:생년월일|출생일|출생|생일)\s*[:：]?\s*$")
+_BIRTH_AFTER_RE = re.compile(r"^\s*(?:생|출생|년생)(?![가-힣])")
+_DIGIT_RE = re.compile(r"\d")
+_HANGUL_OR_ALPHA_RE = re.compile(r"[가-힣A-Za-z]")
+
+
+def _is_qwen_false_positive(category: str, value: str, text: str, start: int, end: int) -> bool:
+    """Filter common form labels, agency/school names, cert numbers, and non-birth dates from Qwen hits."""
+    compact = re.sub(r"\s+", "", value or "")
+    if len(compact) < 2 or compact in _QWEN_LABEL_STOPWORDS:
+        return True
+    if _JAMO_RE.search(compact):
+        return True
+    if category in (NAME, OTHER):
+        if compact.startswith(("(주)", "주식회사")) or compact.endswith(_ORG_CORP_SUFFIXES) or is_role_word(compact):
+            return True
+    if category == OTHER and _ORG_SHORT_RE.match(compact):
+        return True
+    if category == NAME:
+        if _DIGIT_RE.search(compact) or not _HANGUL_OR_ALPHA_RE.search(compact):
+            return True
+        if len(compact) == 2 and not (
+            (re.fullmatch(r"[가-힣]{2}", compact) and looks_like_name(compact))
+            or re.fullmatch(r"[A-Za-z]{2}", compact)
+        ):
+            return True
+    if category == OTHER:
+        if _CERT_ID_RE.match(compact):
+            return True
+        if _STANDALONE_DATE_RE.match(compact):
+            before_ctx = text[max(0, start - 20): start]
+            after_ctx = text[end: min(len(text), end + 8)]
+            if not (_BIRTH_BEFORE_RE.search(before_ctx) or _BIRTH_AFTER_RE.match(after_ctx)):
+                return True
+    return False
 
 BATCH = 8
 MAX_CHUNK_CHARS = 1500
@@ -250,6 +301,8 @@ def find_pii_qwen(
                         if trimmed is None:
                             continue
                         gs, ge = trimmed
+                    if _is_qwen_false_positive(category, block.text[gs:ge], block.text, gs, ge):
+                        continue
                     key = (di, block.block_id, gs, ge, category)
                     if key in seen_spans:
                         continue
